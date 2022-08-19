@@ -1,0 +1,118 @@
+
+```{r}
+library(readxl)
+library(fable)
+library(ggplot2)
+library(dplyr)
+library(ggplot2)
+source('R/bmiz_to_bmi.R')
+source('R/solve_for_wt.R')
+bmi_data <- bmi_data %>% 
+  filter(age <14) %>% 
+  mutate (age = round(age,1)) 
+  
+```
+
+```{r}
+
+m1 <- lm (bmiz ~ age , data = bmi_data )
+predictions <- predict(m1, interval = 'predict')
+all_data <- cbind(bmi_data, predictions)
+all_data$bmi_fit <-  bmi_lookup_cdc(age = all_data$age*12, bmiz = all_data$fit, sex = 2)
+all_data$bmi_real <- bmi_lookup_cdc(age = all_data$age*12, bmiz = all_data$bmiz, sex = 2)
+all_data$bmi_upr <-  bmi_lookup_cdc(age = all_data$age*12, bmiz = all_data$upr, sex = 2)
+all_data$bmi_lwr <-  bmi_lookup_cdc(age = all_data$age*12, bmiz = all_data$lwr, sex = 2)
+
+p2 <- bmi_data |> 
+  as_tsibble(index = age, key = participant) |> 
+  tsibble::fill_gaps() 
+
+fit <- p2 |> 
+  model(arima =  ARIMA(bmiz ~ pdq(1,1,0)))
+
+fcast1 <- forecast(fit, h = (20-max(all_data$age))*30) 
+
+fcast <- fcast1 %>% 
+  hilo(level = c(80, 95,99)) %>% 
+  mutate(adult_height = ifelse(age < 14, NA, all_data$adult_ht_in[1]) )
+
+
+fcast$age_mos <- fcast$age*12
+fcast <- fcast %>% 
+ mutate(bmi = bmi_lookup_cdc(age = age_mos, bmiz = .mean, sex = 2)) %>% 
+ mutate(weight = solve_for_weight(bmi = bmi, height = adult_height)) %>% 
+ mutate(bmiz_lower = fcast$`80%`$lower) %>% 
+ mutate(bmiz_upper = fcast$`80%`$upper) %>% 
+ mutate(weight = solve_for_weight(bmi = bmi, height = adult_height)) %>% 
+ mutate(bmi_lower = bmi_lookup_cdc(age = age_mos, bmiz = bmiz_lower, sex = 2)) %>% 
+ mutate(weight_lower = solve_for_weight(bmi = bmi_lower, height = adult_height)) %>% 
+ mutate(bmi_upper = bmi_lookup_cdc(age = age_mos, bmiz = bmiz_upper, sex = 2)) %>% 
+ mutate(weight_upper = solve_for_weight(bmi = bmi_upper, height = adult_height)) 
+
+autoplot(fcast1) +
+  geom_point(mapping = aes(age, bmiz), data = p2, stat = 'identity', position = 'identity') +
+  stat_smooth(mapping = aes(x = age, y = bmiz), data = all_data, method = lm, formula = y~1) +
+  xlim(2,20)
+```
+
+```{r}
+fcast2 <- split.data.frame(fcast, fcast$participant)
+all_data2 <- split.data.frame(all_data, all_data$participant)
+x <- vector(mode = 'list', length = length(unique(all_data$participant)))
+i = 1
+while (i <= length(unique(bmi_data$participant))) {
+
+x[[i]] <- ggplot(data = fcast2[[i]], mapping = aes(x = age, y = bmi))  +
+  geom_point(mapping = aes(age, bmi_real), data = all_data2[[i]], stat = 'identity', position = 'identity') +
+  stat_smooth(mapping = aes(x = age, y = bmi_real), method = lm, formula = y~x + poly(x,2) + poly(x,3), linetype = 'dotted', col = 'coral2', data = all_data2[[i]], se = FALSE) + 
+  stat_smooth(mapping = aes(x = age, y = bmi_upper), col = 'purple', linetype = 'dashed', data = fcast2[[i]],  position = 'identity' ) +
+  stat_smooth(mapping = aes(x = age, y = bmi_lower), col = 'purple', linetype = 'dashed', data = fcast2[[i]],  position = 'identity' ) + 
+  stat_smooth(mapping = aes (x = age, y = bmi), data = fcast2[[i]]) +
+  xlim(2,20)
+  i = i+1 }
+
+library(gridExtra)
+do.call(grid.arrange, c(x, nrow = 2))
+```
+
+
+```{r}
+y <- vector(mode = 'list', length = length(unique(all_data$participant)))
+
+i = 1
+while (i <= length(unique(bmi_data$participant))) {
+
+y [[i]] <- ggplot() +
+  stat_smooth(mapping = aes(x = age, y = weight_upper), col = 'purple', linetype = 'dashed', data = fcast2[[i]], stat = 'identity', position = 'identity' ) +
+  stat_smooth(mapping = aes(x = age, y = weight_lower), col = 'purple', linetype = 'dashed', data = fcast2[[i]], stat = 'identity', position = 'identity' ) + 
+  stat_smooth(mapping = aes (x = age, y = weight), data = fcast2[[i]]) +
+  xlim(14,18) + 
+  ylab('Weight') 
+  
+i = i+1 
+}
+
+do.call(grid.arrange, c(y, nrow = 2))
+
+```
+```{r}
+l <- length(unique(fcast$participant))
+wt <- vector(mode = 'list', length  = l)
+p_list <- as.list(unique(fcast$participant))
+
+
+i = 1
+while (i <= l) {
+wt[[i]] <- wt_lookup_by_age( p_list[i], 16, fcast)
+i = i + 1
+}
+
+wt
+
+
+
+```
+
+
+
+
