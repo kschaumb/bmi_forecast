@@ -2,9 +2,8 @@ library(readxl)
 library(dplyr)
 library(ggplot2)
 library(zscorer)
-source('R/bmiz_to_bmi.R')
-source('R/solve_for_wt.R')
-bmi_data <-read_excel('em.xlsx')
+
+bmi_data <- readxl::read_excel('test_data/test-data.xlsx')
 
 dfs <- split.data.frame(bmi_data, bmi_data$participant)
 

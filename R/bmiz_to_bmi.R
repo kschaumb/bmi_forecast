@@ -1,7 +1,7 @@
 
 library(readxl)
-cdcData <-read_excel('bmi_cdc.xls')
-wgsrData <-read.csv('wgsrData.csv')
+cdcData <-read.csv('R/lookup_files/bmi_cdc.csv')
+wgsrData <-read.csv('R/lookup_files/wgsrData.csv')
 
 
 bmiz_to_bmi <- function(l, m, s, bmiz) {

@@ -1,7 +1,6 @@
 
 ```{r setup, echo=FALSE}
 knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo = FALSE)
-
 ```
 
 # Adolescent Weight Trajectory Vignette
@@ -10,23 +9,11 @@ knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo = FALSE)
 library(fable)
 library(ggplot2)
 library(dplyr)
-library(ggplot2)
-library(zscorer)
 source('R/bmiz_to_bmi.R')
 source('R/solve_for_wt.R')
 bmi_data <- readxl::read_excel('test_data/test-data.3.xlsx') 
   
 ```
-
-```{r}
-# bmi_data$wt = bmi_data$wt*.4535
-# bmi_data$ht = bmi_data$ht*2.54 
-# bmi_data$sex <- 2
-# 
-# bmi_data <- addWGSR(data = bmi_data, sex = 'sex', firstPart = 'wt', secondPart = 'ht', thirdPart = 'age_days', index = 'bfa', output = 'bmiAgeZ', digits = 2) %>% 
-#   rename('bmiz' = bmiAgeZ)
-```
-
 
 Below I give an example of prediction of adolescent growth for three individuals with varying amounts of childhood growth chart data. The vignette includes three steps:
 
@@ -38,63 +25,80 @@ Below I give an example of prediction of adolescent growth for three individuals
 
 ### Step 1: Coding and Modeling BMI-Z from Growth Charts
 
-In the first step, growth chart inputs (height and weight) are converted to BMI-Z score, which is plotted across childhood along with the mean BMI-Z and 95% confidence band for this mean. After all available BMI-Z scores are input, prediction of future BMI-Z is forecast via an ARIMA model which accounts for recent measures of and variability in BMI-Z to forecast a BMI-Z moving forward. Further, the overall number of observations and variance in previous BMI-Z to create a prediction window for future observations. This prediction window widens over time to account for the fact that we are more confident in observations that are more proximal to the last measurement. While prediction is currently most influenced by those taken at oldest ages (and assume that measurements are taken before ED symptom onset), an alternative model might specify that the highest BMIz scores -- regardless of age -- define prediction.
+In the first step, growth chart inputs (height and weight) are converted to BMI-Z score, which is plotted across childhood along with the mean BMI-Z and 95% confidence band for this mean. After all available BMI-Z scores are input, prediction of future BMI-Z is forecast  which accounts for recent measures of and variability in BMI-Z to forecast a BMI-Z moving forward. Further, the overall number of observations and variance in previous BMI-Z to create a prediction window for future observations. This prediction window widens over time to account for the fact that we are more confident in observations that are more proximal to the last measurement. While prediction is currently most influenced by those taken at oldest ages (and assume that measurements are taken before ED symptom onset), an alternative model might specify that the highest BMIz scores -- regardless of age -- define prediction.
 
 In the following example, participant 1 has routine observations from age 12, with BMI-Z trending slightly up over time. Participant 2 has routine observations from 5-15 centering around a BMI-Z of ~ 0.5, and participant 3 has only four observations all at a young age. Thus, as we move towards age 20, the prediction window for participant 3 is the largest of the three participants. 
 
 ```{r}
 
-m1 <- lm (bmiz ~ age, data = bmi_data )
-predictions <- predict(m1, interval = 'predict')
-all_data <- cbind(bmi_data, predictions)
-all_data$bmi_fit <-  bmi_lookup_cdc(age = all_data$age*12, bmiz = all_data$fit, sex = 2)
-all_data$bmi_real <- bmi_lookup_cdc(age = all_data$age*12, bmiz = all_data$bmiz, sex = 2)
-all_data$bmi_upr <-  bmi_lookup_cdc(age = all_data$age*12, bmiz = all_data$upr, sex = 2)
-all_data$bmi_lwr <-  bmi_lookup_cdc(age = all_data$age*12, bmiz = all_data$lwr, sex = 2)
-
-p2 <- bmi_data |> 
-  as_tsibble(index = age, key = participant) |> 
+# makes a tsibble object with existing data. This object has ONLY Age in months, BMIz scores (at months assessed) and participant number
+ts_data <- bmi_data |> 
+  mutate(agemos = round(age *12, 0)) |> 
+  select(-c(age, adult_ht_in)) |> 
+  as_tsibble(index = agemos, key = participant) |> 
   tsibble::fill_gaps() 
 
-fit <- p2 |> 
-  model(arima =  ARIMA(bmiz ~ pdq(0,1,0)), 
-        naive = NAIVE(bmiz))
+#Allows for scaling function
+scaled_logit <- function(x, lower = 0, upper = 1) {
+  log((x - lower) / (upper - x))
+}
+inv_scaled_logit <- function(x, lower = 0, upper = 1) {
+  (upper - lower) * exp(x) / (1 + exp(x)) + lower
+}
+my_scaled_logit <- new_transformation(
+                    scaled_logit, inv_scaled_logit)
 
-fcast1 <- forecast(fit, h = 150) 
 
-autoplot(fcast1) +
-  geom_point(mapping = aes(age, bmiz), data = p2, stat = 'identity', position = 'identity') +
-  stat_smooth(mapping = aes(x = age, y = bmiz), data = all_data, method = lm, formula = y~1) +
-  xlim(2,20)
+#creates fit data based on a few models
+bmiz_fit <- ts_data |> 
+  model(Mean = MEAN(bmiz), #Mean of all measurements
+        Linear = TSLM(my_scaled_logit(bmiz, lower = -3, upper = 3) ~ agemos), # A linear model which uses a scaled logit model with iupper and lower bounds
+        arima = ARIMA(bmiz ~ pdq(0,1,0))) %>%  # A 'Naive' Model which uses the last observation and includes a random walk from the last obs
+  mutate(C1 = (Mean  + arima + Linear)/3) |> 
+  mutate(C2 = (arima + Mean)/2) |> 
+  forecast(h = 100)  
+
+bmiz_fit |> 
+  filter(.model == 'Linear') |> 
+  autoplot(ts_data, level = 99) +
+  geom_point(x = ts_data$agemos, y = ts_data$bmiz)
+
 ```
 
+
+
+```{r}
+fcast <- bmiz_fcast %>% 
+  hilo(level = c(80, 95))  |> 
+  mutate(adult_height = bmi_data$adult_ht_in[1])
+
+fcast <- fcast %>% 
+ mutate(bmi = bmi_lookup_cdc(age = agemos, bmiz = .mean, sex = 2)) %>% 
+ mutate(weight = solve_for_weight(bmi = bmi, height = adult_height)) %>% 
+ mutate(bmiz_lower = fcast$`80%`$lower) %>% 
+ mutate(bmiz_upper = fcast$`80%`$upper) %>% 
+ mutate(weight = solve_for_weight(bmi = bmi, height = adult_height)) %>% 
+ mutate(bmi_lower = bmi_lookup_cdc(age = agemos, bmiz = bmiz_lower, sex = 2)) %>% 
+ mutate(weight_lower = solve_for_weight(bmi = bmi_lower, height = adult_height)) %>% 
+ mutate(bmi_upper = bmi_lookup_cdc(age = agemos, bmiz = bmiz_upper, sex = 2)) %>% 
+ mutate(weight_upper = solve_for_weight(bmi = bmi_upper, height = adult_height)) 
+
+
+autoplot(fcast)  
+  geom_point(mapping = aes(agemos, bmiz), data = bmiz_fit, stat = 'identity', position = 'identity') 
+  stat_smooth(mapping = aes(x = agemos, y = bmiz), data = ts_data, method = lm, formula = y~1)
+
+```
+```
 
 ### Step 2: Back-translation to BMI
 
 The below graphs back translate these BMI-Z forecasts to actual BMI numbers over time, using an 80% confidence band from the previous ARIMA model
 
 ```{r}
-
-fcast <- fcast1 %>% 
-  hilo(level = c(80, 95)) %>% 
-  mutate(adult_height = ifelse(age < 14, NA, all_data$adult_ht_in[1]) )
-
-
-fcast$age_mos <- fcast$age*12
-fcast <- fcast %>% 
- mutate(bmi = bmi_lookup_cdc(age = age_mos, bmiz = .mean, sex = 2)) %>% 
- mutate(weight = solve_for_weight(bmi = bmi, height = adult_height)) %>% 
- mutate(bmiz_lower = fcast$`80%`$lower) %>% 
- mutate(bmiz_upper = fcast$`80%`$upper) %>% 
- mutate(weight = solve_for_weight(bmi = bmi, height = adult_height)) %>% 
- mutate(bmi_lower = bmi_lookup_cdc(age = age_mos, bmiz = bmiz_lower, sex = 2)) %>% 
- mutate(weight_lower = solve_for_weight(bmi = bmi_lower, height = adult_height)) %>% 
- mutate(bmi_upper = bmi_lookup_cdc(age = age_mos, bmiz = bmiz_upper, sex = 2)) %>% 
- mutate(weight_upper = solve_for_weight(bmi = bmi_upper, height = adult_height)) 
-
 fcast2 <- split.data.frame(fcast, fcast$participant)
-all_data2 <- split.data.frame(all_data, all_data$participant)
-x <- vector(mode = 'list', length = length(unique(all_data$participant)))
+
+x <- vector(mode = 'list', length = length(unique(bmi_data$participant)))
 i = 1
 while (i <= length(unique(bmi_data$participant))) {
 
